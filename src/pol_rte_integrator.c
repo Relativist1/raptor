@@ -668,21 +668,19 @@ void pol_integration_step(struct GRMHD modvar, double frequency,
 
     *Iinv = S_A[0];
     *Iinv_pol = sqrt(S_A[1] * S_A[1] + S_A[2] * S_A[2] + S_A[3] * S_A[3]);
-    /*
-            fprintf(stderr,"r %e te %e th %e nu
-       %e\n",exp(X_u[1]),modvar.theta_e,pitch_ang,nu_p); fprintf(stderr,"B %e %e
-       %e %e\n",modvar.B_u[0],modvar.B_u[1],modvar.B_u[2],modvar.B_u[3]);
-            fprintf(stderr,"U %e %e %e
-       %e\n",modvar.U_u[0],modvar.U_u[1],modvar.U_u[2],modvar.U_u[3]);
-               fprintf(stderr,"k %e %e %e %e\n",k_u[0],k_u[1],k_u[2],k_u[3]);
-               fprintf(stderr,"Iinv %e Iinv_pol %e\n",*Iinv,*Iinv_pol);
-               fprintf(stderr,"jI %e jQ %e jU %e jV %e\n",jI,jQ,jU,jV);
-               fprintf(stderr,"aI %e aQ %e aU %e aV %e\n",aI,aQ,aU,aV);
-               fprintf(stderr,"rQ %e rU %e rV %e\n",rQ,rU,rV);
+    
+            fprintf(stderr,"r %e te %e th %e nu %e\n",exp(X_u[1]),modvar.theta_e,pitch_ang,nu_p); 
+            fprintf(stderr,"B %e %e %e %e\n",modvar.B_u[0],modvar.B_u[1],modvar.B_u[2],modvar.B_u[3]);
+            fprintf(stderr,"U %e %e %e %e\n",modvar.U_u[0],modvar.U_u[1],modvar.U_u[2],modvar.U_u[3]);
+            fprintf(stderr,"k %e %e %e %e\n",k_u[0],k_u[1],k_u[2],k_u[3]);
+            fprintf(stderr,"Iinv %e Iinv_pol %e\n",*Iinv,*Iinv_pol);
+            fprintf(stderr,"jI %e jQ %e jU %e jV %e\n",jI,jQ,jU,jV);
+            fprintf(stderr,"aI %e aQ %e aU %e aV %e\n",aI,aQ,aU,aV);
+            fprintf(stderr,"rQ %e rU %e rV %e\n",rQ,rU,rV);
 
             if(isnan(sqrt(S_A[0]*S_A[0])))
                     exit(1);
-    */
+    
     //        check_tetrad_identities(X_u, tetrad_u);
     //        check_tetrad_compact(X_u, tetrad_u);
 

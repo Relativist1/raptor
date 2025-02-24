@@ -12,6 +12,21 @@
 #ifndef FUNCTIONS_H
 #define FUNCTIONS_H
 
+////////////Added_Exra//////////// 
+void bl_coord(double *X, double *r, double *th);
+void bl_raise(double g_uu[NDIM][NDIM], double V_u[4], double V_d[4]);
+void bl_lower(double g_dd[NDIM][NDIM], double V_d[4], double V_u[4]);
+void normalize(double vcon[NDIM], double Gcov[NDIM][NDIM]);
+int invert_matrix(double Am[][NDIM], double Aminv[][NDIM]);
+void set_dxdX(double X[NDIM], double dxdX[NDIM][NDIM]);
+void set_dXdx(double X[NDIM], double dXdx[NDIM][NDIM]);
+void vec_from_ks(double X[NDIM], double v_ks[NDIM], double v_nat[NDIM]);
+void gcov_bl(double r, double theta, double g_dd[NDIM][NDIM]);
+void gcon_bl(double r, double theta, double g_uu[NDIM][NDIM]);
+void BL_to_KS(double X[NDIM], double BLphoton_u[NDIM], double KSphoton_u[NDIM]);
+////////////////////////////////// 
+
+
 // CORE.C
 /////////
 

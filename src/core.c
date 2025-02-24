@@ -64,9 +64,12 @@ void read_model(char *argv[]) {
     fscanf(input, "%s %s %d", temp, temp2, &max_level);
 
     // Second argument: GRMHD file
+#if (metric == MKSBHAC)
     sscanf(argv[2], "%s", GRMHD_FILE);
     sscanf(argv[3], "%lf", &TIME_INIT);
-
+#elif (metric == BL || metric == MKS)
+   sscanf(argv[2], "%lf", &TIME_INIT);
+#endif
     fprintf(stderr, "\nModel parameters:\n\n");
     fprintf(stderr, "MBH \t\t= %g Msun\n", MBH);
     fprintf(stderr, "DISTANCE \t= %g kpc\n", SOURCE_DIST);
