@@ -52,322 +52,318 @@ typedef struct {
 } CameraPixel;
 
 // GPU kernel for geodesic integration
-static NSString* geodesicKernelSource = @"
-#include <metal_stdlib>
-using namespace metal;
-
-struct GeodesicState {
-    double4 position;    // t, r, theta, phi
-    double4 momentum;    // k_t, k_r, k_theta, k_phi
-};
-
-struct ModelParams {
-    double MBH;
-    double M_UNIT;
-    double a;  // black hole spin
-    double R_ISCO;
-};
-
-// Kerr metric components
-double4 compute_metric_components(double4 pos, double a, double M) {
-    double r = pos.y;
-    double theta = pos.z;
-    double sin_theta = sin(theta);
-    double cos_theta = cos(theta);
-    double rho2 = r*r + a*a*cos_theta*cos_theta;
-    double Delta = r*r - 2*M*r + a*a;
-    
-    double4 g = double4(0.0);
-    g.x = -(1.0 - 2*M*r/rho2);  // g_tt
-    g.y = rho2/Delta;            // g_rr
-    g.z = rho2;                  // g_theta_theta
-    g.w = (r*r + a*a + 2*M*r*a*a*sin_theta*sin_theta/rho2)*sin_theta*sin_theta; // g_phi_phi
-    
-    return g;
-}
-
-// Christoffel symbols for Kerr metric
-void compute_christoffel_symbols(double4 pos, double a, double M, 
-                                thread double4x4x4& Gamma) {
-    double r = pos.y;
-    double theta = pos.z;
-    double sin_theta = sin(theta);
-    double cos_theta = cos(theta);
-    double rho2 = r*r + a*a*cos_theta*cos_theta;
-    double Delta = r*r - 2*M*r + a*a;
-    
-    // Initialize to zero
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            for (int k = 0; k < 4; k++) {
-                Gamma[i][j][k] = 0.0;
-            }
-        }
-    }
-    
-    // Non-zero Christoffel symbols for Kerr metric
-    // This is a simplified version - full implementation would include all components
-    double drho2_dr = 2*r;
-    double drho2_dtheta = -2*a*a*cos_theta*sin_theta;
-    double dDelta_dr = 2*r - 2*M;
-    
-    // Gamma^r_tt
-    Gamma[1][0][0] = -0.5 * (1.0/Delta) * (2*M/rho2 - 4*M*r*drho2_dr/(rho2*rho2));
-    
-    // Gamma^r_rr
-    Gamma[1][1][1] = 0.5 * (1.0/Delta) * dDelta_dr;
-    
-    // Gamma^r_theta_theta
-    Gamma[1][2][2] = -0.5 * (1.0/Delta) * drho2_dr;
-    
-    // Gamma^r_phi_phi
-    Gamma[1][3][3] = -0.5 * (1.0/Delta) * (2*M*a*a*sin_theta*sin_theta/rho2 - 
-                                            4*M*r*a*a*sin_theta*sin_theta*drho2_dr/(rho2*rho2));
-    
-    // Gamma^theta_rr
-    Gamma[2][1][1] = 0.5 * (1.0/rho2) * drho2_dr;
-    
-    // Gamma^theta_theta_theta
-    Gamma[2][2][2] = 0.5 * (1.0/rho2) * drho2_dtheta;
-    
-    // Gamma^theta_phi_phi
-    Gamma[2][3][3] = -0.5 * (1.0/rho2) * (2*M*r*a*a*2*sin_theta*cos_theta/rho2 - 
-                                           2*M*r*a*a*sin_theta*sin_theta*drho2_dtheta/(rho2*rho2));
-}
-
-// Geodesic equation: d^2x^mu/dlambda^2 + Gamma^mu_nu_sigma * (dx^nu/dlambda) * (dx^sigma/dlambda) = 0
-double4 geodesic_equation(double4 pos, double4 mom, double a, double M) {
-    double4x4x4 Gamma;
-    compute_christoffel_symbols(pos, a, M, Gamma);
-    
-    double4 acceleration = double4(0.0);
-    
-    // Compute acceleration using Christoffel symbols
-    for (int mu = 0; mu < 4; mu++) {
-        for (int nu = 0; nu < 4; nu++) {
-            for (int sigma = 0; sigma < 4; sigma++) {
-                acceleration[mu] -= Gamma[mu][nu][sigma] * mom[nu] * mom[sigma];
-            }
-        }
-    }
-    
-    return acceleration;
-}
-
-// RK4 integrator for geodesic equations
-void rk4_step(thread GeodesicState& state, double dt, double a, double M) {
-    double4 k1_pos, k1_mom, k2_pos, k2_mom, k3_pos, k3_mom, k4_pos, k4_mom;
-    double4 k1_acc, k2_acc, k3_acc, k4_acc;
-    
-    // Step 1
-    k1_pos = state.momentum * dt;
-    k1_acc = geodesic_equation(state.position, state.momentum, a, M);
-    k1_mom = k1_acc * dt;
-    
-    // Step 2
-    double4 pos2 = state.position + 0.5 * k1_pos;
-    double4 mom2 = state.momentum + 0.5 * k1_mom;
-    k2_pos = mom2 * dt;
-    k2_acc = geodesic_equation(pos2, mom2, a, M);
-    k2_mom = k2_acc * dt;
-    
-    // Step 3
-    double4 pos3 = state.position + 0.5 * k2_pos;
-    double4 mom3 = state.momentum + 0.5 * k2_mom;
-    k3_pos = mom3 * dt;
-    k3_acc = geodesic_equation(pos3, mom3, a, M);
-    k3_mom = k3_acc * dt;
-    
-    // Step 4
-    double4 pos4 = state.position + k3_pos;
-    double4 mom4 = state.momentum + k3_mom;
-    k4_pos = mom4 * dt;
-    k4_acc = geodesic_equation(pos4, mom4, a, M);
-    k4_mom = k4_acc * dt;
-    
-    // Update state
-    state.position += (k1_pos + 2.0*k2_pos + 2.0*k3_pos + k4_pos) / 6.0;
-    state.momentum += (k1_mom + 2.0*k2_mom + 2.0*k3_mom + k4_mom) / 6.0;
-}
-
-kernel void integrate_geodesics(device const double* alpha_beta,
-                               device double* lightpaths,
-                               device int* steps_array,
-                               constant ModelParams& params,
-                               constant double& dt,
-                               constant int& max_steps,
-                               constant double& cutoff_inner,
-                               uint pixel_id [[thread_position_in_grid]]) {
-    
-    double alpha = alpha_beta[pixel_id * 2];
-    double beta = alpha_beta[pixel_id * 2 + 1];
-    
-    // Initialize geodesic state
-    GeodesicState state;
-    
-    // Set initial position (observer at infinity)
-    state.position = double4(0.0, 1e6, M_PI/2.0, 0.0);  // t, r, theta, phi
-    
-    // Set initial momentum based on alpha, beta (impact parameters)
-    double r_obs = 1e6;
-    double sin_theta_obs = sin(M_PI/2.0);
-    double cos_theta_obs = cos(M_PI/2.0);
-    
-    // Convert alpha, beta to initial momentum components
-    // This is a simplified version - full implementation would use proper coordinate transformations
-    state.momentum = double4(1.0, -alpha/r_obs, -beta/(r_obs*sin_theta_obs), 0.0);
-    
-    // Normalize momentum to null condition
-    double4 g = compute_metric_components(state.position, params.a, params.MBH);
-    double norm = 0.0;
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            norm += g[i] * state.momentum[i] * state.momentum[j];
-        }
-    }
-    state.momentum = state.momentum / sqrt(-norm);
-    
-    int steps = 0;
-    int lightpath_offset = pixel_id * max_steps * 9;
-    
-    // Store initial state
-    lightpaths[lightpath_offset + steps * 9 + 0] = state.position.x;  // t
-    lightpaths[lightpath_offset + steps * 9 + 1] = state.position.y;  // r
-    lightpaths[lightpath_offset + steps * 9 + 2] = state.position.z;  // theta
-    lightpaths[lightpath_offset + steps * 9 + 3] = state.position.w;  // phi
-    lightpaths[lightpath_offset + steps * 9 + 4] = state.momentum.x;  // k_t
-    lightpaths[lightpath_offset + steps * 9 + 5] = state.momentum.y;  // k_r
-    lightpaths[lightpath_offset + steps * 9 + 6] = state.momentum.z;  // k_theta
-    lightpaths[lightpath_offset + steps * 9 + 7] = state.momentum.w;  // k_phi
-    lightpaths[lightpath_offset + steps * 9 + 8] = 0.0;  // affine parameter
-    steps++;
-    
-    // Integrate geodesic
-    while (steps < max_steps && state.position.y > cutoff_inner) {
-        rk4_step(state, dt, params.a, params.MBH);
-        
-        // Store state
-        lightpaths[lightpath_offset + steps * 9 + 0] = state.position.x;
-        lightpaths[lightpath_offset + steps * 9 + 1] = state.position.y;
-        lightpaths[lightpath_offset + steps * 9 + 2] = state.position.z;
-        lightpaths[lightpath_offset + steps * 9 + 3] = state.position.w;
-        lightpaths[lightpath_offset + steps * 9 + 4] = state.momentum.x;
-        lightpaths[lightpath_offset + steps * 9 + 5] = state.momentum.y;
-        lightpaths[lightpath_offset + steps * 9 + 6] = state.momentum.z;
-        lightpaths[lightpath_offset + steps * 9 + 7] = state.momentum.w;
-        lightpaths[lightpath_offset + steps * 9 + 8] = steps * dt;
-        steps++;
-    }
-    
-    steps_array[pixel_id] = steps;
-}
-";
+static NSString* geodesicKernelSource = @"#include <metal_stdlib>\n"
+"using namespace metal;\n"
+"\n"
+"struct GeodesicState {\n"
+"    double4 position;    // t, r, theta, phi\n"
+"    double4 momentum;    // k_t, k_r, k_theta, k_phi\n"
+"};\n"
+"\n"
+"struct ModelParams {\n"
+"    double MBH;\n"
+"    double M_UNIT;\n"
+"    double a;  // black hole spin\n"
+"    double R_ISCO;\n"
+"};\n"
+"\n"
+"// Kerr metric components\n"
+"double4 compute_metric_components(double4 pos, double a, double M) {\n"
+"    double r = pos.y;\n"
+"    double theta = pos.z;\n"
+"    double sin_theta = sin(theta);\n"
+"    double cos_theta = cos(theta);\n"
+"    double rho2 = r*r + a*a*cos_theta*cos_theta;\n"
+"    double Delta = r*r - 2*M*r + a*a;\n"
+"    \n"
+"    double4 g = double4(0.0);\n"
+"    g.x = -(1.0 - 2*M*r/rho2);  // g_tt\n"
+"    g.y = rho2/Delta;            // g_rr\n"
+"    g.z = rho2;                  // g_theta_theta\n"
+"    g.w = (r*r + a*a + 2*M*r*a*a*sin_theta*sin_theta/rho2)*sin_theta*sin_theta; // g_phi_phi\n"
+"    \n"
+"    return g;\n"
+"}\n"
+"\n"
+"// Christoffel symbols for Kerr metric\n"
+"void compute_christoffel_symbols(double4 pos, double a, double M, \n"
+"                                thread double4x4x4& Gamma) {\n"
+"    double r = pos.y;\n"
+"    double theta = pos.z;\n"
+"    double sin_theta = sin(theta);\n"
+"    double cos_theta = cos(theta);\n"
+"    double rho2 = r*r + a*a*cos_theta*cos_theta;\n"
+"    double Delta = r*r - 2*M*r + a*a;\n"
+"    \n"
+"    // Initialize to zero\n"
+"    for (int i = 0; i < 4; i++) {\n"
+"        for (int j = 0; j < 4; j++) {\n"
+"            for (int k = 0; k < 4; k++) {\n"
+"                Gamma[i][j][k] = 0.0;\n"
+"            }\n"
+"        }\n"
+"    }\n"
+"    \n"
+"    // Non-zero Christoffel symbols for Kerr metric\n"
+"    // This is a simplified version - full implementation would include all components\n"
+"    double drho2_dr = 2*r;\n"
+"    double drho2_dtheta = -2*a*a*cos_theta*sin_theta;\n"
+"    double dDelta_dr = 2*r - 2*M;\n"
+"    \n"
+"    // Gamma^r_tt\n"
+"    Gamma[1][0][0] = -0.5 * (1.0/Delta) * (2*M/rho2 - 4*M*r*drho2_dr/(rho2*rho2));\n"
+"    \n"
+"    // Gamma^r_rr\n"
+"    Gamma[1][1][1] = 0.5 * (1.0/Delta) * dDelta_dr;\n"
+"    \n"
+"    // Gamma^r_theta_theta\n"
+"    Gamma[1][2][2] = -0.5 * (1.0/Delta) * drho2_dr;\n"
+"    \n"
+"    // Gamma^r_phi_phi\n"
+"    Gamma[1][3][3] = -0.5 * (1.0/Delta) * (2*M*a*a*sin_theta*sin_theta/rho2 - \n"
+"                                            4*M*r*a*a*sin_theta*sin_theta*drho2_dr/(rho2*rho2));\n"
+"    \n"
+"    // Gamma^theta_rr\n"
+"    Gamma[2][1][1] = 0.5 * (1.0/rho2) * drho2_dr;\n"
+"    \n"
+"    // Gamma^theta_theta_theta\n"
+"    Gamma[2][2][2] = 0.5 * (1.0/rho2) * drho2_dtheta;\n"
+"    \n"
+"    // Gamma^theta_phi_phi\n"
+"    Gamma[2][3][3] = -0.5 * (1.0/rho2) * (2*M*r*a*a*2*sin_theta*cos_theta/rho2 - \n"
+"                                           2*M*r*a*a*sin_theta*sin_theta*drho2_dtheta/(rho2*rho2));\n"
+"}\n"
+"\n"
+"// Geodesic equation: d^2x^mu/dlambda^2 + Gamma^mu_nu_sigma * (dx^nu/dlambda) * (dx^sigma/dlambda) = 0\n"
+"double4 geodesic_equation(double4 pos, double4 mom, double a, double M) {\n"
+"    double4x4x4 Gamma;\n"
+"    compute_christoffel_symbols(pos, a, M, Gamma);\n"
+"    \n"
+"    double4 acceleration = double4(0.0);\n"
+"    \n"
+"    // Compute acceleration using Christoffel symbols\n"
+"    for (int mu = 0; mu < 4; mu++) {\n"
+"        for (int nu = 0; nu < 4; nu++) {\n"
+"            for (int sigma = 0; sigma < 4; sigma++) {\n"
+"                acceleration[mu] -= Gamma[mu][nu][sigma] * mom[nu] * mom[sigma];\n"
+"            }\n"
+"        }\n"
+"    }\n"
+"    \n"
+"    return acceleration;\n"
+"}\n"
+"\n"
+"// RK4 integrator for geodesic equations\n"
+"void rk4_step(thread GeodesicState& state, double dt, double a, double M) {\n"
+"    double4 k1_pos, k1_mom, k2_pos, k2_mom, k3_pos, k3_mom, k4_pos, k4_mom;\n"
+"    double4 k1_acc, k2_acc, k3_acc, k4_acc;\n"
+"    \n"
+"    // Step 1\n"
+"    k1_pos = state.momentum * dt;\n"
+"    k1_acc = geodesic_equation(state.position, state.momentum, a, M);\n"
+"    k1_mom = k1_acc * dt;\n"
+"    \n"
+"    // Step 2\n"
+"    double4 pos2 = state.position + 0.5 * k1_pos;\n"
+"    double4 mom2 = state.momentum + 0.5 * k1_mom;\n"
+"    k2_pos = mom2 * dt;\n"
+"    k2_acc = geodesic_equation(pos2, mom2, a, M);\n"
+"    k2_mom = k2_acc * dt;\n"
+"    \n"
+"    // Step 3\n"
+"    double4 pos3 = state.position + 0.5 * k2_pos;\n"
+"    double4 mom3 = state.momentum + 0.5 * k2_mom;\n"
+"    k3_pos = mom3 * dt;\n"
+"    k3_acc = geodesic_equation(pos3, mom3, a, M);\n"
+"    k3_mom = k3_acc * dt;\n"
+"    \n"
+"    // Step 4\n"
+"    double4 pos4 = state.position + k3_pos;\n"
+"    double4 mom4 = state.momentum + k3_mom;\n"
+"    k4_pos = mom4 * dt;\n"
+"    k4_acc = geodesic_equation(pos4, mom4, a, M);\n"
+"    k4_mom = k4_acc * dt;\n"
+"    \n"
+"    // Update state\n"
+"    state.position += (k1_pos + 2.0*k2_pos + 2.0*k3_pos + k4_pos) / 6.0;\n"
+"    state.momentum += (k1_mom + 2.0*k2_mom + 2.0*k3_mom + k4_mom) / 6.0;\n"
+"}\n"
+"\n"
+"kernel void integrate_geodesics(device const double* alpha_beta,\n"
+"                               device double* lightpaths,\n"
+"                               device int* steps_array,\n"
+"                               constant ModelParams& params,\n"
+"                               constant double& dt,\n"
+"                               constant int& max_steps,\n"
+"                               constant double& cutoff_inner,\n"
+"                               uint pixel_id [[thread_position_in_grid]]) {\n"
+"    \n"
+"    double alpha = alpha_beta[pixel_id * 2];\n"
+"    double beta = alpha_beta[pixel_id * 2 + 1];\n"
+"    \n"
+"    // Initialize geodesic state\n"
+"    GeodesicState state;\n"
+"    \n"
+"    // Set initial position (observer at infinity)\n"
+"    state.position = double4(0.0, 1e6, M_PI/2.0, 0.0);  // t, r, theta, phi\n"
+"    \n"
+"    // Set initial momentum based on alpha, beta (impact parameters)\n"
+"    double r_obs = 1e6;\n"
+"    double sin_theta_obs = sin(M_PI/2.0);\n"
+"    double cos_theta_obs = cos(M_PI/2.0);\n"
+"    \n"
+"    // Convert alpha, beta to initial momentum components\n"
+"    // This is a simplified version - full implementation would use proper coordinate transformations\n"
+"    state.momentum = double4(1.0, -alpha/r_obs, -beta/(r_obs*sin_theta_obs), 0.0);\n"
+"    \n"
+"    // Normalize momentum to null condition\n"
+"    double4 g = compute_metric_components(state.position, params.a, params.MBH);\n"
+"    double norm = 0.0;\n"
+"    for (int i = 0; i < 4; i++) {\n"
+"        for (int j = 0; j < 4; j++) {\n"
+"            norm += g[i] * state.momentum[i] * state.momentum[j];\n"
+"        }\n"
+"    }\n"
+"    state.momentum = state.momentum / sqrt(-norm);\n"
+"    \n"
+"    int steps = 0;\n"
+"    int lightpath_offset = pixel_id * max_steps * 9;\n"
+"    \n"
+"    // Store initial state\n"
+"    lightpaths[lightpath_offset + steps * 9 + 0] = state.position.x;  // t\n"
+"    lightpaths[lightpath_offset + steps * 9 + 1] = state.position.y;  // r\n"
+"    lightpaths[lightpath_offset + steps * 9 + 2] = state.position.z;  // theta\n"
+"    lightpaths[lightpath_offset + steps * 9 + 3] = state.position.w;  // phi\n"
+"    lightpaths[lightpath_offset + steps * 9 + 4] = state.momentum.x;  // k_t\n"
+"    lightpaths[lightpath_offset + steps * 9 + 5] = state.momentum.y;  // k_r\n"
+"    lightpaths[lightpath_offset + steps * 9 + 6] = state.momentum.z;  // k_theta\n"
+"    lightpaths[lightpath_offset + steps * 9 + 7] = state.momentum.w;  // k_phi\n"
+"    lightpaths[lightpath_offset + steps * 9 + 8] = 0.0;  // affine parameter\n"
+"    steps++;\n"
+"    \n"
+"    // Integrate geodesic\n"
+"    while (steps < max_steps && state.position.y > cutoff_inner) {\n"
+"        rk4_step(state, dt, params.a, params.MBH);\n"
+"        \n"
+"        // Store state\n"
+"        lightpaths[lightpath_offset + steps * 9 + 0] = state.position.x;\n"
+"        lightpaths[lightpath_offset + steps * 9 + 1] = state.position.y;\n"
+"        lightpaths[lightpath_offset + steps * 9 + 2] = state.position.z;\n"
+"        lightpaths[lightpath_offset + steps * 9 + 3] = state.position.w;\n"
+"        lightpaths[lightpath_offset + steps * 9 + 4] = state.momentum.x;\n"
+"        lightpaths[lightpath_offset + steps * 9 + 5] = state.momentum.y;\n"
+"        lightpaths[lightpath_offset + steps * 9 + 6] = state.momentum.z;\n"
+"        lightpaths[lightpath_offset + steps * 9 + 7] = state.momentum.w;\n"
+"        lightpaths[lightpath_offset + steps * 9 + 8] = steps * dt;\n"
+"        steps++;\n"
+"    }\n"
+"    \n"
+"    steps_array[pixel_id] = steps;\n"
+"}\n";
 
 // GPU kernel for radiative transfer
-static NSString* radiativeTransferKernelSource = @"
-#include <metal_stdlib>
-using namespace metal;
-
-struct StokesParameters {
-    double I, Q, U, V;
-};
-
-// Synchrotron emission coefficients for kappa distribution
-double j_synch_kappa(double theta_e, double n_e, double nu, double B, double theta_B) {
-    double w = (kappa-3)*theta_e/kappa;
-    double nuc = ELECTRON_CHARGE * B / (2 * M_PI * ELECTRON_MASS * SPEED_OF_LIGHT);
-    double X = nu / (nuc * pow(w * kappa, 2) * sin(theta_B));
-    
-    // Simplified emission coefficient
-    double factor = pow(X, 1.0/3.0) * exp(-pow(X, 0.84) / 30.0);
-    return factor * n_e * pow(theta_e, 2.0) * pow(B, 1.5);
-}
-
-// Absorption coefficient
-double alpha_synch_kappa(double theta_e, double n_e, double nu, double B, double theta_B) {
-    double w = (kappa-3)*theta_e/kappa;
-    double nuc = ELECTRON_CHARGE * B / (2 * M_PI * ELECTRON_MASS * SPEED_OF_LIGHT);
-    double X = nu / (nuc * pow(w * kappa, 2) * sin(theta_B));
-    
-    // Simplified absorption coefficient
-    double factor = pow(X, -2.0/3.0) * exp(-pow(X, 0.84) / 30.0);
-    return factor * n_e * pow(theta_e, 1.5) * pow(B, 2.5);
-}
-
-kernel void compute_radiative_transfer(device const double* lightpaths,
-                                     device const int* steps_array,
-                                     device const double* frequencies,
-                                     device double* IQUV_results,
-                                     device double* tau_results,
-                                     device double* tauF_results,
-                                     constant double& B_field,
-                                     constant double& n_e,
-                                     constant double& theta_e,
-                                     uint pixel_id [[thread_position_in_grid]]) {
-    
-    int steps = steps_array[pixel_id];
-    if (steps == 0) return;
-    
-    int lightpath_offset = pixel_id * MAX_STEPS * 9;
-    
-    // Initialize Stokes parameters
-    StokesParameters stokes = {0.0, 0.0, 0.0, 0.0};
-    double tau = 0.0;
-    double tauF = 0.0;
-    
-    // For each frequency
-    for (int f = 0; f < num_frequencies; f++) {
-        double nu = frequencies[f];
-        
-        // Reset for this frequency
-        stokes.I = 0.0;
-        stokes.Q = 0.0;
-        stokes.U = 0.0;
-        stokes.V = 0.0;
-        tau = 0.0;
-        tauF = 0.0;
-        
-        // Integrate along light path
-        for (int step = 0; step < steps; step++) {
-            int offset = lightpath_offset + step * 9;
-            
-            double r = lightpaths[offset + 1];
-            double theta = lightpaths[offset + 2];
-            double B_local = B_field * pow(r, -2.0);  // Simplified B field scaling
-            double n_e_local = n_e * pow(r, -2.0);    // Simplified density scaling
-            double theta_e_local = theta_e * pow(r, -1.0); // Simplified temperature scaling
-            
-            // Compute emission and absorption coefficients
-            double j_nu = j_synch_kappa(theta_e_local, n_e_local, nu, B_local, M_PI/4.0);
-            double alpha_nu = alpha_synch_kappa(theta_e_local, n_e_local, nu, B_local, M_PI/4.0);
-            
-            // Simple radiative transfer integration
-            double ds = 1.0;  // Simplified step size
-            double dtau = alpha_nu * ds;
-            
-            // Update optical depth
-            tau += dtau;
-            
-            // Update Stokes parameters (simplified)
-            double intensity = j_nu / alpha_nu * (1.0 - exp(-dtau));
-            stokes.I += intensity * exp(-tau);
-            
-            // Update cumulative optical depth for Faraday rotation
-            tauF += dtau * pow(nu, -2.0);
-        }
-        
-        // Store results for this frequency
-        int result_offset = (pixel_id * num_frequencies + f) * 4;
-        IQUV_results[result_offset + 0] = stokes.I;
-        IQUV_results[result_offset + 1] = stokes.Q;
-        IQUV_results[result_offset + 2] = stokes.U;
-        IQUV_results[result_offset + 3] = stokes.V;
-        
-        tau_results[pixel_id * num_frequencies + f] = tau;
-        tauF_results[pixel_id * num_frequencies + f] = tauF;
-    }
-}
-";
+static NSString* radiativeTransferKernelSource = @"#include <metal_stdlib>\n"
+"using namespace metal;\n"
+"\n"
+"struct StokesParameters {\n"
+"    double I, Q, U, V;\n"
+"};\n"
+"\n"
+"// Synchrotron emission coefficients for kappa distribution\n"
+"double j_synch_kappa(double theta_e, double n_e, double nu, double B, double theta_B) {\n"
+"    double w = (kappa-3)*theta_e/kappa;\n"
+"    double nuc = ELECTRON_CHARGE * B / (2 * M_PI * ELECTRON_MASS * SPEED_OF_LIGHT);\n"
+"    double X = nu / (nuc * pow(w * kappa, 2) * sin(theta_B));\n"
+"    \n"
+"    // Simplified emission coefficient\n"
+"    double factor = pow(X, 1.0/3.0) * exp(-pow(X, 0.84) / 30.0);\n"
+"    return factor * n_e * pow(theta_e, 2.0) * pow(B, 1.5);\n"
+"}\n"
+"\n"
+"// Absorption coefficient\n"
+"double alpha_synch_kappa(double theta_e, double n_e, double nu, double B, double theta_B) {\n"
+"    double w = (kappa-3)*theta_e/kappa;\n"
+"    double nuc = ELECTRON_CHARGE * B / (2 * M_PI * ELECTRON_MASS * SPEED_OF_LIGHT);\n"
+"    double X = nu / (nuc * pow(w * kappa, 2) * sin(theta_B));\n"
+"    \n"
+"    // Simplified absorption coefficient\n"
+"    double factor = pow(X, -2.0/3.0) * exp(-pow(X, 0.84) / 30.0);\n"
+"    return factor * n_e * pow(theta_e, 1.5) * pow(B, 2.5);\n"
+"}\n"
+"\n"
+"kernel void compute_radiative_transfer(device const double* lightpaths,\n"
+"                                     device const int* steps_array,\n"
+"                                     device const double* frequencies,\n"
+"                                     device double* IQUV_results,\n"
+"                                     device double* tau_results,\n"
+"                                     device double* tauF_results,\n"
+"                                     constant double& B_field,\n"
+"                                     constant double& n_e,\n"
+"                                     constant double& theta_e,\n"
+"                                     uint pixel_id [[thread_position_in_grid]]) {\n"
+"    \n"
+"    int steps = steps_array[pixel_id];\n"
+"    if (steps == 0) return;\n"
+"    \n"
+"    int lightpath_offset = pixel_id * MAX_STEPS * 9;\n"
+"    \n"
+"    // Initialize Stokes parameters\n"
+"    StokesParameters stokes = {0.0, 0.0, 0.0, 0.0};\n"
+"    double tau = 0.0;\n"
+"    double tauF = 0.0;\n"
+"    \n"
+"    // For each frequency\n"
+"    for (int f = 0; f < num_frequencies; f++) {\n"
+"        double nu = frequencies[f];\n"
+"        \n"
+"        // Reset for this frequency\n"
+"        stokes.I = 0.0;\n"
+"        stokes.Q = 0.0;\n"
+"        stokes.U = 0.0;\n"
+"        stokes.V = 0.0;\n"
+"        tau = 0.0;\n"
+"        tauF = 0.0;\n"
+"        \n"
+"        // Integrate along light path\n"
+"        for (int step = 0; step < steps; step++) {\n"
+"            int offset = lightpath_offset + step * 9;\n"
+"            \n"
+"            double r = lightpaths[offset + 1];\n"
+"            double theta = lightpaths[offset + 2];\n"
+"            double B_local = B_field * pow(r, -2.0);  // Simplified B field scaling\n"
+"            double n_e_local = n_e * pow(r, -2.0);    // Simplified density scaling\n"
+"            double theta_e_local = theta_e * pow(r, -1.0); // Simplified temperature scaling\n"
+"            \n"
+"            // Compute emission and absorption coefficients\n"
+"            double j_nu = j_synch_kappa(theta_e_local, n_e_local, nu, B_local, M_PI/4.0);\n"
+"            double alpha_nu = alpha_synch_kappa(theta_e_local, n_e_local, nu, B_local, M_PI/4.0);\n"
+"            \n"
+"            // Simple radiative transfer integration\n"
+"            double ds = 1.0;  // Simplified step size\n"
+"            double dtau = alpha_nu * ds;\n"
+"            \n"
+"            // Update optical depth\n"
+"            tau += dtau;\n"
+"            \n"
+"            // Update Stokes parameters (simplified)\n"
+"            double intensity = j_nu / alpha_nu * (1.0 - exp(-dtau));\n"
+"            stokes.I += intensity * exp(-tau);\n"
+"            \n"
+"            // Update cumulative optical depth for Faraday rotation\n"
+"            tauF += dtau * pow(nu, -2.0);\n"
+"        }\n"
+"        \n"
+"        // Store results for this frequency\n"
+"        int result_offset = (pixel_id * num_frequencies + f) * 4;\n"
+"        IQUV_results[result_offset + 0] = stokes.I;\n"
+"        IQUV_results[result_offset + 1] = stokes.Q;\n"
+"        IQUV_results[result_offset + 2] = stokes.U;\n"
+"        IQUV_results[result_offset + 3] = stokes.V;\n"
+"        \n"
+"        tau_results[pixel_id * num_frequencies + f] = tau;\n"
+"        tauF_results[pixel_id * num_frequencies + f] = tauF;\n"
+"    }\n"
+"}\n";
 
 @interface RAPTORMetal : NSObject
 
